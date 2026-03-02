@@ -1,0 +1,15 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "you2midi-desktop",
+  "outputfilename": "you2midi-desktop",
+  "frontend:install": "npm --prefix ../../frontend ci",
+  "frontend:build": "npm --prefix ../../frontend run build:wails",
+  "frontend:dev:watcher": "npm --prefix ../../frontend run dev:wails",
+  "frontend:dev:serverUrl": "http://localhost:5173",
+  "author": {
+    "name": "you2midi",
+    "email": ""
+  },
+  "assetdir": "frontend/dist",
+  "wailsjsdir": "../frontend/src/wailsjs"
+}

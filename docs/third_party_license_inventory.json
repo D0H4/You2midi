@@ -1,0 +1,66 @@
+{
+  "components": [
+    {
+      "id": "python-runtime",
+      "name": "Python Runtime (embedded/portable)",
+      "match_paths": [
+        "runtime/python/**"
+      ],
+      "license_expression": "PSF-2.0",
+      "status": "review_required",
+      "source_url": "https://www.python.org/",
+      "notice_required": true,
+      "notes": "Pin exact Python version and include full license text for bundled runtime and bundled libraries."
+    },
+    {
+      "id": "yt-dlp",
+      "name": "yt-dlp",
+      "match_paths": [
+        "runtime/ytdlp/**",
+        "**/yt-dlp.exe"
+      ],
+      "license_expression": "Unlicense",
+      "status": "approved",
+      "source_url": "https://github.com/yt-dlp/yt-dlp",
+      "notice_required": true,
+      "notes": "Include upstream license text in installer notice bundle."
+    },
+    {
+      "id": "transkun-binary",
+      "name": "Transkun Runtime",
+      "match_paths": [
+        "runtime/transkun/**"
+      ],
+      "license_expression": "TBD",
+      "status": "review_required",
+      "source_url": "https://github.com/Yujia-Yan/Transkun",
+      "notice_required": true,
+      "notes": "Confirm upstream code/model license terms before distribution."
+    },
+    {
+      "id": "transkun-model-assets",
+      "name": "Transkun Model Assets",
+      "match_paths": [
+        "runtime/transkun/models/**",
+        "runtime/models/transkun/**"
+      ],
+      "license_expression": "TBD",
+      "status": "review_required",
+      "source_url": "https://github.com/Yujia-Yan/Transkun",
+      "notice_required": true,
+      "notes": "Model files can have separate redistribution terms from source code."
+    },
+    {
+      "id": "neuralnote-binary",
+      "name": "NeuralNote Runtime",
+      "match_paths": [
+        "runtime/neuralnote/**"
+      ],
+      "license_expression": "TBD",
+      "status": "review_required",
+      "source_url": "https://github.com/DamRsn/NeuralNote",
+      "notice_required": true,
+      "notes": "Confirm license obligations for standalone binary distribution."
+    }
+  ]
+}

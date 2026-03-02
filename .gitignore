@@ -1,0 +1,52 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Go
+bin/
+*.exe
+*.test
+*.out
+.gocache/
+.gomodcache/
+.gopath/
+.goenv
+.gotelemetry/
+
+# Node
+frontend/node_modules/
+desktop/frontend/node_modules/
+desktop/frontend/dist/
+
+# Build outputs / packaging
+dist/
+desktop/build/bin/
+
+# SQLite / local runtime data
+*.db
+*.db-shm
+*.db-wal
+.you2midi/
+
+# Local config (contains secrets)
+config.toml
+
+# Temp / backup artifacts
+*.tmp
+*~
+~
+*.swp
+*.swo
+*.orig
+*.rej
+*.go.[0-9]*
+
+AGENTS.md
+Plan.md

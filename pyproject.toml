@@ -1,0 +1,27 @@
+[project]
+name = "you2midi-python"
+version = "0.1.0"
+description = "Python engine dependencies for You2Midi (Transkun + yt-dlp)"
+requires-python = ">=3.10"
+dependencies = [
+    "setuptools<71",  # transkun requires pkg_resources (removed in setuptools>=71)
+    "transkun",
+    "yt-dlp",
+    # torch, torchaudio are pulled via the pytorch-cu128 index below
+    "torch>=2.7",
+    "torchaudio>=2.7",
+]
+
+[tool.uv]
+# Use a local .venv so the Go binary can reference a fixed path.
+
+[[tool.uv.index]]
+# RTX 5080 / Blackwell (sm_120) requires CUDA 12.8+ and PyTorch >= 2.7
+# CUDA 12.9 on this machine is compatible with cu128 builds
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }

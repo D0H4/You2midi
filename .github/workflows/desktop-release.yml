@@ -1,0 +1,121 @@
+name: desktop-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package-windows:
+    runs-on: windows-latest
+    env:
+      GOCACHE: ${{ github.workspace }}\.gocache
+      GOMODCACHE: ${{ github.workspace }}\.gomodcache
+      GOENV: ${{ github.workspace }}\.goenv
+      GOTELEMETRY: off
+      YOU2MIDI_GITHUB_REPO: ${{ github.repository }}
+      EXPECTED_SIGNER_SUBJECT: ${{ secrets.EXPECTED_SIGNER_SUBJECT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        shell: pwsh
+        run: npm --prefix frontend ci
+
+      - name: Install Wails CLI
+        shell: pwsh
+        run: |
+          if (Get-Command wails -ErrorAction SilentlyContinue) {
+            wails version
+            exit 0
+          }
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+          wails version
+
+      - name: Build Desktop (Wails)
+        id: desktop
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/desktop_build.ps1
+          if (Test-Path "dist/desktop/you2midi-desktop.exe") {
+            "has_desktop=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            "has_desktop=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Write-Warning "Desktop executable not produced (Wails project may not be initialized yet)."
+          }
+
+      - name: Build Backend Binary For Smoke
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/desktop | Out-Null
+          go build -o dist/desktop/you2midi.exe ./
+
+      - name: Smoke Test (Health)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/smoke_post_install.ps1 -BinaryPath dist/desktop/you2midi.exe
+
+      - name: Generate Artifact Manifest
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/generate_artifact_manifest.ps1 -InputRoot dist/desktop -OutputPath dist/desktop/artifact-manifest.json
+
+      - name: Verify License Compliance
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/verify_license_compliance.ps1 -ManifestPath dist/desktop/artifact-manifest.json -Strict
+
+      - name: Install Inno Setup
+        if: steps.desktop.outputs.has_desktop == 'true'
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Installer
+        if: steps.desktop.outputs.has_desktop == 'true'
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/build_installer.ps1 -SourceDir dist/desktop -AppVersion ${{ github.ref_name }}
+
+      - name: Verify Windows Security (Signed Releases)
+        if: steps.desktop.outputs.has_desktop == 'true' && env.EXPECTED_SIGNER_SUBJECT != ''
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/verify_windows_security.ps1 `
+            -InstallerPath dist/installer/You2Midi-Setup-${{ github.ref_name }}.exe `
+            -DesktopExePath dist/desktop/you2midi-desktop.exe `
+            -RequireSignature `
+            -ExpectedPublisher "${{ env.EXPECTED_SIGNER_SUBJECT }}" `
+            -Strict
+
+      - name: Fail on Tag If Desktop Missing
+        if: startsWith(github.ref, 'refs/tags/') && steps.desktop.outputs.has_desktop != 'true'
+        shell: pwsh
+        run: |
+          Write-Error "Tag release requires Wails desktop artifact, but none was produced."
+          exit 1
+
+      - name: Fail on Tag If Signed Verification Not Configured
+        if: startsWith(github.ref, 'refs/tags/') && env.EXPECTED_SIGNER_SUBJECT == ''
+        shell: pwsh
+        run: |
+          Write-Error "Tag release requires EXPECTED_SIGNER_SUBJECT secret for signed Windows security verification."
+          exit 1
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: you2midi-windows-${{ github.ref_name }}
+          path: |
+            dist/desktop/**
+            dist/installer/**
+            dist/security/**

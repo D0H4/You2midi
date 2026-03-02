@@ -1,0 +1,27 @@
+# You2Midi example configuration
+# Copy this file to config.toml and customize as needed.
+schema_version = 1
+
+[engine]
+  python_bin          = ".venv/Scripts/python.exe"
+  venv_path           = ""
+  transkun_bin        = ".venv/Scripts/transkun.exe"
+  neuralnote_bin      = "neuralnote"
+  ytdlp_bin           = ".venv/Scripts/yt-dlp.exe"
+  device              = "auto"     # auto | cpu | cuda
+  max_attempts        = 3
+  max_concurrent_jobs = 2          # legacy fallback (used when both cpu/gpu are 0)
+  max_concurrent_cpu  = 0          # 0 = use legacy fallback
+  max_concurrent_gpu  = 0          # 0 = disable dedicated GPU workers
+  queue_size          = 128
+
+[workspace]
+  root          = "~/.you2midi/jobs"
+  temp_file_ttl = "24h"
+  disk_quota_mb = 10240
+
+[server]
+  host            = "127.0.0.1"
+  port            = 8080
+  jwt_secret      = ""  # set for PWA mode
+  allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
