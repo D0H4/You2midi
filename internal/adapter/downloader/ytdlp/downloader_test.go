@@ -75,6 +75,32 @@ func TestBuildArgs_IncludesNodeRuntimeWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestBuildNoJSFallbackArgs_UsesFallbackExtractorClients(t *testing.T) {
+	t.Parallel()
+	d := &Downloader{bin: "yt-dlp"}
+	args := d.buildNoJSFallbackArgs("out.%(ext)s", "https://youtube.com/watch?v=test")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--extractor-args youtube:player_client=android,ios,tv") {
+		t.Fatalf("expected fallback extractor args, got %q", joined)
+	}
+	if !strings.Contains(joined, "-f bestaudio/best") {
+		t.Fatalf("expected relaxed fallback format, got %q", joined)
+	}
+}
+
+func TestShouldRetryWithNoJSFallback(t *testing.T) {
+	t.Parallel()
+	if !shouldRetryWithNoJSFallback("No supported JavaScript runtime could be found", "") {
+		t.Fatal("expected retry signal for missing JavaScript runtime")
+	}
+	if !shouldRetryWithNoJSFallback("Requested format is not available", "") {
+		t.Fatal("expected retry signal for requested format unavailable")
+	}
+	if shouldRetryWithNoJSFallback("Video unavailable", "") {
+		t.Fatal("did not expect retry signal for unrelated hard error")
+	}
+}
+
 func TestDownloadAndHash_ReturnsFileHash(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -140,5 +166,19 @@ func TestNew_DoesNotRewritePlainCommandName(t *testing.T) {
 	d := New("yt-dlp", &staticRunner{})
 	if d.bin != "yt-dlp" {
 		t.Fatalf("expected plain command name to remain unchanged, got %q", d.bin)
+	}
+}
+
+func TestDetectNode_UsesEnvOverrideWhenPresent(t *testing.T) {
+	tmp := t.TempDir()
+	nodePath := filepath.Join(tmp, "node.exe")
+	if err := os.WriteFile(nodePath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("YOU2MIDI_NODE_BIN", nodePath)
+
+	got := detectNode()
+	if got != nodePath {
+		t.Fatalf("expected env node path %q, got %q", nodePath, got)
 	}
 }

@@ -76,14 +76,22 @@ if (-not (Test-Path $packagedConfigPath)) {
 
 $venvScriptsDir = Join-Path $srcPath "runtime/venv/Scripts"
 $runtimeManifestPath = Join-Path $srcPath "runtime/python-runtime.json"
+$nodeRuntimeManifestPath = Join-Path $srcPath "runtime/node-runtime.json"
 $runtimePythonDir = Join-Path $srcPath "runtime/python"
+$runtimeNodeDir = Join-Path $srcPath "runtime/node"
 $hasBundledVenv = Test-Path (Join-Path $venvScriptsDir "python.exe")
 $hasRemoteRuntimeManifest = Test-Path $runtimeManifestPath
 if (-not $hasBundledVenv -and -not $hasRemoteRuntimeManifest) {
     if (-not (Stop-OrWarn "No Python runtime found. Expected either '$venvScriptsDir\\python.exe' or '$runtimeManifestPath'.")) { exit 0 }
 }
+if (-not (Test-Path $nodeRuntimeManifestPath)) {
+    if (-not (Stop-OrWarn "Node runtime manifest '$nodeRuntimeManifestPath' not found. Re-run desktop build to generate it.")) { exit 0 }
+}
 if ($hasRemoteRuntimeManifest -and (Test-Path $runtimePythonDir)) {
     Write-Warning "Remote runtime manifest mode detected with stale '$runtimePythonDir'. Installer script excludes runtime/python for remote mode."
+}
+if (Test-Path $runtimeNodeDir) {
+    Write-Warning "Remote node runtime manifest mode detected with stale '$runtimeNodeDir'. Installer script excludes runtime/node."
 }
 if ($hasBundledVenv) {
     foreach ($runtimeExe in @("python.exe", "transkun.exe", "yt-dlp.exe")) {
@@ -119,7 +127,7 @@ if (-not (Test-Path $InstallerScript)) {
 
 function Remove-StaleRemoteRuntime {
     param([string]$RootPath)
-    foreach ($rel in @("runtime/python", "runtime/python.new", "runtime/python.old")) {
+    foreach ($rel in @("runtime/python", "runtime/python.new", "runtime/python.old", "runtime/node", "runtime/node.new", "runtime/node.old")) {
         $target = Join-Path $RootPath $rel
         if (Test-Path $target) {
             Remove-Item -Path $target -Recurse -Force -ErrorAction SilentlyContinue

@@ -61,6 +61,12 @@ func looksLikePath(bin string) bool {
 
 // detectNode returns the absolute path to node.exe/node if available on PATH.
 func detectNode() string {
+	if configured := strings.TrimSpace(os.Getenv("YOU2MIDI_NODE_BIN")); configured != "" {
+		if info, err := os.Stat(configured); err == nil && !info.IsDir() {
+			return configured
+		}
+	}
+
 	name := "node"
 	if runtime.GOOS == "windows" {
 		name = "node.exe"
@@ -79,14 +85,15 @@ func (d *Downloader) Download(ctx context.Context, url string, destDir string) (
 	}
 
 	outTemplate := filepath.Join(destDir, "audio.%(ext)s")
-	args := d.buildArgs(outTemplate, url)
+	primaryArgs := d.buildArgs(outTemplate, url)
+	fallbackArgs := d.buildNoJSFallbackArgs(outTemplate, url)
 	var (
 		lastErr error
 		bins    = downloadCandidates(d.bin)
 	)
 	for i, bin := range bins {
 		start := time.Now()
-		res, err := d.runner.Run(ctx, bin, args, runner.RunOptions{Dir: destDir})
+		res, err := d.runner.Run(ctx, bin, primaryArgs, runner.RunOptions{Dir: destDir})
 		elapsed := time.Since(start)
 		if err != nil {
 			lastErr = fmt.Errorf("ytdlp: run %q for %q: %w", bin, url, err)
@@ -114,7 +121,30 @@ func (d *Downloader) Download(ctx context.Context, url string, destDir string) (
 
 		// yt-dlp may exit non-zero while still downloading successfully.
 		if res.ExitCode != 0 {
-			if isHardError(stderr, stdout) {
+			if shouldRetryWithNoJSFallback(stderr, stdout) {
+				slog.Warn("yt-dlp primary attempt failed; retrying with no-JS fallback strategy",
+					slog.Int("exit_code", res.ExitCode),
+					slog.String("stderr_snippet", truncate(stderr, 280)),
+				)
+				retryStart := time.Now()
+				retryRes, retryErr := d.runner.Run(ctx, bin, fallbackArgs, runner.RunOptions{Dir: destDir})
+				retryElapsed := time.Since(retryStart)
+				if retryErr != nil {
+					lastErr = fmt.Errorf("ytdlp: fallback run %q for %q: %w", bin, url, retryErr)
+				} else {
+					retryStderr := strings.TrimSpace(string(retryRes.Stderr))
+					retryStdout := strings.TrimSpace(string(retryRes.Stdout))
+					slog.Info("yt-dlp fallback download finished",
+						slog.String("url", url),
+						slog.String("bin", bin),
+						slog.Duration("duration", retryElapsed),
+						slog.Int("exit_code", retryRes.ExitCode),
+					)
+					if retryRes.ExitCode != 0 && isHardError(retryStderr, retryStdout) {
+						return "", fmt.Errorf("ytdlp: yt-dlp fallback failed (exit %d): %s", retryRes.ExitCode, retryStderr)
+					}
+				}
+			} else if isHardError(stderr, stdout) {
 				return "", fmt.Errorf("ytdlp: yt-dlp failed (exit %d): %s", res.ExitCode, stderr)
 			}
 			slog.Warn("yt-dlp exited non-zero but may have succeeded; checking for output file",
@@ -178,6 +208,20 @@ func (d *Downloader) buildArgs(outTemplate, url string) []string {
 	return args
 }
 
+// buildNoJSFallbackArgs constructs a fallback strategy for hosts without Node.js.
+// It broadens format selection and uses non-web YouTube clients to reduce JS runtime reliance.
+func (d *Downloader) buildNoJSFallbackArgs(outTemplate, url string) []string {
+	args := []string{
+		"--no-playlist",
+		"-f", "bestaudio/best",
+		"-o", outTemplate,
+		"--no-progress",
+		"--extractor-args", "youtube:player_client=android,ios,tv",
+	}
+	args = append(args, url)
+	return args
+}
+
 // isHardError returns true if stderr indicates a genuine download failure.
 func isHardError(stderr, stdout string) bool {
 	lower := strings.ToLower(stderr + " " + stdout)
@@ -192,6 +236,22 @@ func isHardError(stderr, stdout string) bool {
 	}
 	for _, e := range hardErrors {
 		if strings.Contains(lower, e) {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldRetryWithNoJSFallback(stderr, stdout string) bool {
+	lower := strings.ToLower(stderr + " " + stdout)
+	signals := []string{
+		"no supported javascript runtime could be found",
+		"youtube extraction without a js runtime has been deprecated",
+		"requested format is not available",
+		"no video formats found",
+	}
+	for _, s := range signals {
+		if strings.Contains(lower, s) {
 			return true
 		}
 	}

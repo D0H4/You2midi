@@ -9,7 +9,9 @@ param(
         "you2midi-desktop.exe",
         "you2midi-backend.exe",
         "you2midi-updater.exe",
-        "runtime/python-runtime.json"
+        "runtime/python-runtime.json",
+        "runtime/node-runtime.json",
+        "runtime/vcredist/vc_redist.x64.exe"
     )
 )
 

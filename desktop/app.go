@@ -198,9 +198,23 @@ func (a *App) startBackend() error {
 	cmd := exec.Command(backendPath, "-config", configPath)
 	cmd.Dir = workDir
 
+	if err := a.ensureVCRedistInstalled(filepath.Dir(backendPath)); err != nil {
+		wrapped := fmt.Errorf("ensure Visual C++ runtime: %w", err)
+		a.setLastBackendErr(wrapped.Error())
+		a.publishRuntimeBootstrap("error", "vcredist", wrapped.Error())
+		return wrapped
+	}
+
 	pythonScripts, err := a.resolvePythonRuntimeScripts(filepath.Dir(backendPath))
 	if err != nil {
 		wrapped := fmt.Errorf("resolve python runtime: %w", err)
+		a.setLastBackendErr(wrapped.Error())
+		a.publishRuntimeBootstrap("error", "runtime", wrapped.Error())
+		return wrapped
+	}
+	nodeBin, err := a.resolveNodeRuntimeBinary(filepath.Dir(backendPath))
+	if err != nil {
+		wrapped := fmt.Errorf("resolve node runtime: %w", err)
 		a.setLastBackendErr(wrapped.Error())
 		a.publishRuntimeBootstrap("error", "runtime", wrapped.Error())
 		return wrapped
@@ -229,6 +243,10 @@ func (a *App) startBackend() error {
 		if ytDlpBin := filepath.Join(pythonScripts, binaryWithExe("yt-dlp")); fileExists(ytDlpBin) {
 			env = setEnvValue(env, "YOU2MIDI_YTDLP_BIN", ytDlpBin)
 		}
+	}
+	if nodeBin != "" {
+		env = setEnvValue(env, "YOU2MIDI_NODE_BIN", nodeBin)
+		env = prependEnvPath(env, filepath.Dir(nodeBin))
 	}
 	if ffmpegBin := findBundledFFmpegBin(filepath.Dir(backendPath)); ffmpegBin != "" {
 		env = prependEnvPath(env, ffmpegBin)
@@ -558,6 +576,76 @@ func findBundledFFmpegBin(backendDir string) string {
 		}
 	}
 	return ""
+}
+
+func findBundledVCRedistBootstrapper(backendDir string) string {
+	candidates := []string{
+		filepath.Join(backendDir, "runtime", "vcredist", "vc_redist.x64.exe"),
+		filepath.Join(backendDir, "..", "runtime", "vcredist", "vc_redist.x64.exe"),
+		filepath.Join(backendDir, "..", "..", "runtime", "vcredist", "vc_redist.x64.exe"),
+		filepath.Join(backendDir, "..", "..", "..", "runtime", "vcredist", "vc_redist.x64.exe"),
+	}
+	for _, candidate := range candidates {
+		if fileExists(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func (a *App) ensureVCRedistInstalled(backendDir string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	if isVCRedistInstalledWindows() {
+		return nil
+	}
+
+	bootstrapper := findBundledVCRedistBootstrapper(backendDir)
+	if bootstrapper == "" {
+		return errors.New("vc_redist.x64.exe bootstrapper not found in runtime/vcredist")
+	}
+
+	if a.ctx != nil {
+		wruntime.LogInfo(a.ctx, "Microsoft Visual C++ runtime missing; starting bootstrapper")
+	}
+	a.publishRuntimeBootstrap("running", "vcredist", "Microsoft Visual C++ 런타임을 설치하는 중입니다.")
+
+	cmd := exec.Command(bootstrapper, "/install", "/passive", "/norestart")
+	cmd.Dir = filepath.Dir(bootstrapper)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if runtime.GOOS == "windows" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("run vc_redist bootstrapper: %w", err)
+	}
+	if !isVCRedistInstalledWindows() {
+		return errors.New("Microsoft Visual C++ runtime installation did not complete")
+	}
+	return nil
+}
+
+func isVCRedistInstalledWindows() bool {
+	if runtime.GOOS != "windows" {
+		return true
+	}
+
+	query := func(path string) bool {
+		cmd := exec.Command("reg", "query", path, "/v", "Installed")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return false
+		}
+		s := strings.ToLower(string(out))
+		return strings.Contains(s, "0x1")
+	}
+
+	if query(`HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64`) {
+		return true
+	}
+	return query(`HKLM\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64`)
 }
 
 func prependEnvPath(env []string, dir string) []string {

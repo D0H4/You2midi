@@ -29,7 +29,7 @@ SignTool={#SignToolName}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "runtime\python\*;runtime\python.new\*;runtime\python.old\*"
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "runtime\python\*;runtime\python.new\*;runtime\python.old\*;runtime\node\*;runtime\node.new\*;runtime\node.old\*"
 
 [Icons]
 Name: "{group}\You2Midi"; Filename: "{app}\You2midi.exe"

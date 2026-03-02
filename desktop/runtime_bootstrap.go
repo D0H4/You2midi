@@ -22,7 +22,10 @@ import (
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-const pythonRuntimeManifestName = "python-runtime.json"
+const (
+	pythonRuntimeManifestName = "python-runtime.json"
+	nodeRuntimeManifestName   = "node-runtime.json"
+)
 
 const (
 	runtimeTorchVersion      = "2.10.0+cu128"
@@ -44,6 +47,14 @@ type pythonRuntimeManifest struct {
 	ArchiveURL    string `json:"archive_url"`
 	ArchiveSHA256 string `json:"archive_sha256"`
 	ScriptsRel    string `json:"scripts_rel_path"`
+	ArchiveType   string `json:"archive_type"`
+}
+
+type nodeRuntimeManifest struct {
+	Version       string `json:"version"`
+	ArchiveURL    string `json:"archive_url"`
+	ArchiveSHA256 string `json:"archive_sha256"`
+	BinRel        string `json:"bin_rel_path"`
 	ArchiveType   string `json:"archive_type"`
 }
 
@@ -125,6 +136,53 @@ func (a *App) resolvePythonRuntimeScripts(backendDir string) (string, error) {
 	return scripts, nil
 }
 
+func (a *App) resolveNodeRuntimeBinary(backendDir string) (string, error) {
+	manifestPath, runtimeRoot := findNodeRuntimeManifest(backendDir)
+	nodeBin := findBundledNodeBinary(backendDir)
+	if manifestPath == "" {
+		return nodeBin, nil
+	}
+
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+
+	nodeBin = findBundledNodeBinary(backendDir)
+
+	manifest, err := loadNodeRuntimeManifest(manifestPath)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(manifest.ArchiveURL) == "" {
+		if nodeBin != "" {
+			return nodeBin, nil
+		}
+		return "", fmt.Errorf("%s missing archive_url", manifestPath)
+	}
+	archiveType := normalizeArchiveType(manifest.ArchiveType, manifest.ArchiveURL)
+	switch archiveType {
+	case "zip", "tar.gz":
+	default:
+		return "", fmt.Errorf("unsupported node runtime archive_type %q (supported: zip, tar.gz)", archiveType)
+	}
+
+	if nodeBin == "" {
+		a.publishRuntimeBootstrap("running", "node-download", "Node.js 런타임을 다운로드하는 중입니다.")
+		if err := provisionNodeRuntime(runtimeRoot, manifest, archiveType); err != nil {
+			return "", err
+		}
+		a.publishRuntimeBootstrap("running", "node-extract", "Node.js 런타임 파일을 설치하는 중입니다.")
+		nodeBin = findBundledNodeBinary(backendDir)
+		if nodeBin == "" {
+			return "", fmt.Errorf("node runtime provisioned but node binary not found under %s", runtimeRoot)
+		}
+	}
+
+	if err := runExecutable(nodeBin, 30*time.Second, "--version"); err != nil {
+		return "", fmt.Errorf("verify node runtime: %w", err)
+	}
+	return nodeBin, nil
+}
+
 func findPythonRuntimeManifest(backendDir string) (manifestPath string, runtimeRoot string) {
 	candidates := []string{
 		filepath.Join(backendDir, "runtime"),
@@ -139,6 +197,38 @@ func findPythonRuntimeManifest(backendDir string) (manifestPath string, runtimeR
 		}
 	}
 	return "", ""
+}
+
+func findNodeRuntimeManifest(backendDir string) (manifestPath string, runtimeRoot string) {
+	candidates := []string{
+		filepath.Join(backendDir, "runtime"),
+		filepath.Join(backendDir, "..", "runtime"),
+		filepath.Join(backendDir, "..", "..", "runtime"),
+		filepath.Join(backendDir, "..", "..", "..", "runtime"),
+	}
+	for _, runtimeDir := range candidates {
+		manifest := filepath.Join(runtimeDir, nodeRuntimeManifestName)
+		if fileExists(manifest) {
+			return manifest, filepath.Join(runtimeDir, "node")
+		}
+	}
+	return "", ""
+}
+
+func findBundledNodeBinary(backendDir string) string {
+	candidates := []string{
+		filepath.Join(backendDir, "runtime", "node"),
+		filepath.Join(backendDir, "..", "runtime", "node"),
+		filepath.Join(backendDir, "..", "..", "runtime", "node"),
+		filepath.Join(backendDir, "..", "..", "..", "runtime", "node"),
+	}
+	for _, candidate := range candidates {
+		nodeBin := filepath.Join(candidate, binaryWithExe("node"))
+		if fileExists(nodeBin) {
+			return nodeBin
+		}
+	}
+	return ""
 }
 
 func findBundledPythonScripts(backendDir string) string {
@@ -177,6 +267,18 @@ func loadPythonRuntimeManifest(path string) (*pythonRuntimeManifest, error) {
 	var manifest pythonRuntimeManifest
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		return nil, fmt.Errorf("parse runtime manifest: %w", err)
+	}
+	return &manifest, nil
+}
+
+func loadNodeRuntimeManifest(path string) (*nodeRuntimeManifest, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read node runtime manifest: %w", err)
+	}
+	var manifest nodeRuntimeManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return nil, fmt.Errorf("parse node runtime manifest: %w", err)
 	}
 	return &manifest, nil
 }
@@ -271,6 +373,96 @@ func provisionPythonRuntime(runtimeRoot string, manifest *pythonRuntimeManifest,
 	return nil
 }
 
+func provisionNodeRuntime(runtimeRoot string, manifest *nodeRuntimeManifest, archiveType string) error {
+	if strings.TrimSpace(runtimeRoot) == "" {
+		return errors.New("node runtime root is empty")
+	}
+
+	parentDir := filepath.Dir(runtimeRoot)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		return fmt.Errorf("create node runtime parent dir: %w", err)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "you2midi-node-runtime-*")
+	if err != nil {
+		return fmt.Errorf("create temp node runtime dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	archiveName := "runtime.zip"
+	if archiveType == "tar.gz" {
+		archiveName = "runtime.tar.gz"
+	}
+	archivePath := filepath.Join(tmpDir, archiveName)
+	if err := downloadFile(manifest.ArchiveURL, archivePath, 10*time.Minute); err != nil {
+		return fmt.Errorf("download node runtime archive: %w", err)
+	}
+	if strings.TrimSpace(manifest.ArchiveSHA256) != "" {
+		sum, err := fileSHA256Hex(archivePath)
+		if err != nil {
+			return fmt.Errorf("hash node runtime archive: %w", err)
+		}
+		if !strings.EqualFold(sum, strings.TrimSpace(manifest.ArchiveSHA256)) {
+			return fmt.Errorf("node runtime archive sha256 mismatch")
+		}
+	}
+
+	extractDir := filepath.Join(tmpDir, "extract")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		return fmt.Errorf("create node extract dir: %w", err)
+	}
+	switch archiveType {
+	case "zip":
+		if err := extractZipSecure(archivePath, extractDir); err != nil {
+			return fmt.Errorf("extract node runtime zip: %w", err)
+		}
+	case "tar.gz":
+		if err := extractTarGzSecure(archivePath, extractDir); err != nil {
+			return fmt.Errorf("extract node runtime tar.gz: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported node archive type %q", archiveType)
+	}
+
+	binRel := strings.TrimSpace(manifest.BinRel)
+	if binRel == "" {
+		if runtime.GOOS == "windows" {
+			binRel = "node.exe"
+		} else {
+			binRel = "bin/node"
+		}
+	}
+
+	installSource, err := resolveNodeRuntimeRootFromExtract(extractDir, binRel)
+	if err != nil {
+		return err
+	}
+
+	stagingRoot := runtimeRoot + ".new"
+	backupRoot := runtimeRoot + ".old"
+	_ = os.RemoveAll(stagingRoot)
+	_ = os.RemoveAll(backupRoot)
+
+	if err := copyDir(installSource, stagingRoot); err != nil {
+		return fmt.Errorf("stage node runtime files: %w", err)
+	}
+
+	if err := os.RemoveAll(backupRoot); err != nil {
+		return fmt.Errorf("cleanup node runtime backup: %w", err)
+	}
+	if dirExists(runtimeRoot) {
+		if err := os.Rename(runtimeRoot, backupRoot); err != nil {
+			return fmt.Errorf("backup old node runtime: %w", err)
+		}
+	}
+	if err := os.Rename(stagingRoot, runtimeRoot); err != nil {
+		_ = os.Rename(backupRoot, runtimeRoot)
+		return fmt.Errorf("activate new node runtime: %w", err)
+	}
+	_ = os.RemoveAll(backupRoot)
+	return nil
+}
+
 func resolveRuntimeRootFromExtract(extractDir string, scriptsRel string) (string, error) {
 	scriptsRel = filepath.FromSlash(strings.Trim(strings.ReplaceAll(scriptsRel, "\\", "/"), "/"))
 	candidates := []string{
@@ -293,6 +485,28 @@ func resolveRuntimeRootFromExtract(extractDir string, scriptsRel string) (string
 		}
 	}
 	return "", fmt.Errorf("runtime archive does not contain %q with python executable", scriptsRel)
+}
+
+func resolveNodeRuntimeRootFromExtract(extractDir string, binRel string) (string, error) {
+	binRel = filepath.FromSlash(strings.Trim(strings.ReplaceAll(binRel, "\\", "/"), "/"))
+	candidates := []string{
+		filepath.Join(extractDir, binRel),
+	}
+	if children, err := os.ReadDir(extractDir); err == nil && len(children) == 1 && children[0].IsDir() {
+		candidates = append(candidates, filepath.Join(extractDir, children[0].Name(), binRel))
+	}
+
+	for _, binPath := range candidates {
+		if fileExists(binPath) {
+			root := binPath
+			levels := strings.Count(binRel, string(os.PathSeparator)) + 1
+			for i := 0; i < levels; i++ {
+				root = filepath.Dir(root)
+			}
+			return root, nil
+		}
+	}
+	return "", fmt.Errorf("node runtime archive does not contain %q", binRel)
 }
 
 func downloadFile(url string, destPath string, timeout time.Duration) error {
@@ -757,6 +971,25 @@ func runPython(pythonBin string, timeout time.Duration, args ...string) error {
 		"PYTHONDONTWRITEBYTECODE=1",
 	)
 	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(output))
+		if len(msg) > 800 {
+			msg = msg[len(msg)-800:]
+		}
+		if msg == "" {
+			return err
+		}
+		return fmt.Errorf("%w: %s", err, msg)
+	}
+	return nil
+}
+
+func runExecutable(bin string, timeout time.Duration, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(output))

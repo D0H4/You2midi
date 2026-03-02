@@ -15,6 +15,11 @@ param(
     [string]$PythonRuntimeArchiveSHA256 = "",
     [string]$PythonRuntimeArchiveType = "",
     [string]$PythonRuntimeScriptsRelPath = "Scripts",
+    [string]$NodeRuntimeArchiveUrl = "",
+    [string]$NodeRuntimeArchiveSHA256 = "",
+    [string]$NodeRuntimeArchiveType = "",
+    [string]$NodeRuntimeBinRelPath = "node.exe",
+    [string]$NodeRuntimeChannelBaseUrl = "https://nodejs.org/dist/latest-v22.x",
     [string]$FfmpegDir = "",
     [string]$CudaRuntimeDir = "",
     [string]$WebView2BootstrapperUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
@@ -143,6 +148,49 @@ function Resolve-ArchiveType {
     return "auto"
 }
 
+function Resolve-NodeRuntimeArchiveInfo {
+    param(
+        [string]$ArchiveUrl,
+        [string]$ArchiveSHA256,
+        [string]$ArchiveType,
+        [string]$ChannelBaseUrl
+    )
+    if ($ArchiveUrl) {
+        return [ordered]@{
+            archive_url = $ArchiveUrl
+            archive_sha256 = $ArchiveSHA256
+            archive_type = (Resolve-ArchiveType -ArchiveUrl $ArchiveUrl -ExplicitType $ArchiveType)
+        }
+    }
+
+    $base = ($ChannelBaseUrl.TrimEnd('/'))
+    if (-not $base) {
+        throw "Node runtime channel base URL is empty."
+    }
+    $shaUrl = "$base/SHASUMS256.txt"
+    Write-Host "Resolving Node runtime archive from '$shaUrl'..."
+    $content = (Invoke-WebRequest -Uri $shaUrl).Content
+    $line = ($content -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match "node-v.+-win-x64\.zip$" } | Select-Object -First 1)
+    if (-not $line) {
+        throw "Could not resolve node-v*-win-x64.zip from $shaUrl"
+    }
+    $parts = ($line -split "\s+")
+    if ($parts.Count -lt 2) {
+        throw "Unexpected SHASUMS256 format for Node runtime."
+    }
+    $sha = $parts[0].Trim()
+    $file = $parts[$parts.Count - 1].Trim()
+    if (-not $sha -or -not $file) {
+        throw "Invalid Node runtime SHASUMS entry: $line"
+    }
+    $url = "$base/$file"
+    return [ordered]@{
+        archive_url = $url
+        archive_sha256 = $sha
+        archive_type = "zip"
+    }
+}
+
 function Write-PackagedConfig {
     param([string]$OutputRoot)
     $configPath = Join-Path $OutputRoot "config.toml"
@@ -215,6 +263,7 @@ if (Test-Path $cudaLegacyDir) {
 $runtimeRootDir = Join-Path $resolvedOutputDir "runtime"
 New-Item -ItemType Directory -Force -Path $runtimeRootDir | Out-Null
 $runtimeManifestPath = Join-Path $runtimeRootDir "python-runtime.json"
+$nodeRuntimeManifestPath = Join-Path $runtimeRootDir "node-runtime.json"
 
 Write-Host "Building backend service executable..."
 & go build -o $backendExePath .
@@ -257,6 +306,34 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-PackagedConfig -OutputRoot $resolvedOutputDir
 
+$nodeArchiveUrl = $NodeRuntimeArchiveUrl
+if (-not $nodeArchiveUrl) {
+    $nodeArchiveUrl = $env:YOU2MIDI_NODE_RUNTIME_URL
+}
+$nodeArchiveSHA256 = $NodeRuntimeArchiveSHA256
+if (-not $nodeArchiveSHA256) {
+    $nodeArchiveSHA256 = $env:YOU2MIDI_NODE_RUNTIME_SHA256
+}
+$nodeArchiveType = $NodeRuntimeArchiveType
+if (-not $nodeArchiveType) {
+    $nodeArchiveType = $env:YOU2MIDI_NODE_RUNTIME_ARCHIVE_TYPE
+}
+$nodeChannelBaseUrl = $NodeRuntimeChannelBaseUrl
+if (-not $nodeChannelBaseUrl) {
+    $nodeChannelBaseUrl = $env:YOU2MIDI_NODE_RUNTIME_CHANNEL_BASE_URL
+}
+$nodeRuntimeInfo = Resolve-NodeRuntimeArchiveInfo -ArchiveUrl $nodeArchiveUrl -ArchiveSHA256 $nodeArchiveSHA256 -ArchiveType $nodeArchiveType -ChannelBaseUrl $nodeChannelBaseUrl
+$nodeManifest = [ordered]@{
+    version = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+    archive_url = $nodeRuntimeInfo.archive_url
+    archive_sha256 = $nodeRuntimeInfo.archive_sha256
+    bin_rel_path = $NodeRuntimeBinRelPath
+    archive_type = $nodeRuntimeInfo.archive_type
+}
+$nodeManifestJson = $nodeManifest | ConvertTo-Json -Depth 8
+[System.IO.File]::WriteAllText($nodeRuntimeManifestPath, $nodeManifestJson, [System.Text.UTF8Encoding]::new($false))
+Write-Host "Wrote node runtime manifest: $nodeRuntimeManifestPath"
+
 if ($UseRemotePythonRuntime) {
     Stop-You2MidiRuntimeProcesses
 
@@ -286,6 +363,9 @@ if ($UseRemotePythonRuntime) {
         (Join-Path $runtimeRootDir "python"),
         (Join-Path $runtimeRootDir "python.new"),
         (Join-Path $runtimeRootDir "python.old"),
+        (Join-Path $runtimeRootDir "node"),
+        (Join-Path $runtimeRootDir "node.new"),
+        (Join-Path $runtimeRootDir "node.old"),
         (Join-Path $runtimeRootDir ".deps_ready.json")
     )
     $existingStaleRuntime = @($staleRuntimePaths | Where-Object { Test-Path $_ })
