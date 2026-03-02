@@ -29,8 +29,14 @@ const (
 	runtimeTorchaudioVersion = "2.10.0+cu128"
 	runtimeTranskunVersion   = "2.0.1"
 	runtimeYtDlpVersion      = "2026.2.21"
+	runtimeNumpyVersion      = "2.4.2"
+	runtimeSoxrVersion       = "1.0.0"
+	runtimeModuleconfVersion = "0.1.4"
+	runtimeMidoVersion       = "1.3.3"
+	runtimePrettyMidiVersion = "0.2.11"
+	runtimePydubVersion      = "0.25.1"
 	runtimeDepsMarkerFile    = ".deps_ready.json"
-	runtimeDepsProfile       = "py312-cu128-transkun2.0.1-ytdlp2026.2.21-v1"
+	runtimeDepsProfile       = "py312-cu128-transkun2.0.1-ytdlp2026.2.21-v3-pinned"
 )
 
 type pythonRuntimeManifest struct {
@@ -576,15 +582,56 @@ func (a *App) ensurePythonRuntimeDependencies(runtimeRoot string, scriptsDir str
 	if a.ctx != nil {
 		wruntime.LogInfo(a.ctx, "installing transcription dependencies")
 	}
-	a.publishRuntimeBootstrap("running", "tools", "transkun/yt-dlp를 설치하는 중입니다.")
+	a.publishRuntimeBootstrap("running", "tools", "추론 필수 패키지를 설치하는 중입니다.")
 	if err := runPython(
 		pythonBin,
-		45*time.Minute,
+		20*time.Minute,
+		"-m", "pip", "install", "--upgrade", "--only-binary=:all:",
+		"numpy=="+runtimeNumpyVersion,
+		"soxr=="+runtimeSoxrVersion,
+	); err != nil {
+		return fmt.Errorf("install binary runtime prerequisites: %w", err)
+	}
+
+	if err := runPython(
+		pythonBin,
+		20*time.Minute,
 		"-m", "pip", "install", "--upgrade",
+		"moduleconf=="+runtimeModuleconfVersion,
+		"mido=="+runtimeMidoVersion,
+		"pydub=="+runtimePydubVersion,
+	); err != nil {
+		return fmt.Errorf("install pure-python runtime prerequisites: %w", err)
+	}
+
+	// pretty_midi currently ships sdist only; install without deps after explicit deps are satisfied.
+	if err := runPython(
+		pythonBin,
+		10*time.Minute,
+		"-m", "pip", "install", "--upgrade", "--no-deps",
+		"pretty_midi=="+runtimePrettyMidiVersion,
+	); err != nil {
+		return fmt.Errorf("install pretty_midi runtime: %w", err)
+	}
+
+	// transkun declares training/eval dependencies (including ncls) that trigger native builds on Windows.
+	// For end-user inference runtime, install transkun without deps and provide only required runtime deps above.
+	if err := runPython(
+		pythonBin,
+		20*time.Minute,
+		"-m", "pip", "install", "--upgrade", "--no-deps",
 		"transkun=="+runtimeTranskunVersion,
+	); err != nil {
+		return fmt.Errorf("install transkun runtime (no-deps): %w", err)
+	}
+
+	if err := runPython(
+		pythonBin,
+		10*time.Minute,
+		"-m", "pip", "install", "--upgrade",
 		"yt-dlp=="+runtimeYtDlpVersion,
 	); err != nil {
-		return fmt.Errorf("install transcription dependencies: %w", err)
+		return fmt.Errorf("install yt-dlp runtime: %w", err)
 	}
 
 	// Verify imports at end to avoid false-ready marker.
