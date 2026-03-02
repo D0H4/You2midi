@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"time"
 
 	"you2midi/internal/domain"
@@ -90,6 +92,9 @@ func (s *TranscriptionService) RunJob(ctx context.Context, jobID string) error {
 	engineErr, ok := jobErr.(*domain.EngineError)
 	if !ok {
 		engineErr = domain.NewEngineError(domain.ErrUnknown, jobErr)
+	}
+	if engineErr.Code == domain.ErrUnknown {
+		engineErr.Message = appendUnknownLogHint(engineErr.Message)
 	}
 
 	if current, getErr := s.jobs.Get(ctx, jobID); getErr == nil && current.State == domain.JobStateCancelled {
@@ -230,4 +235,20 @@ func (s *TranscriptionService) queueSafeDevice(device string) string {
 		return "cpu"
 	}
 	return device
+}
+
+func appendUnknownLogHint(message string) string {
+	logPath := strings.TrimSpace(os.Getenv("YOU2MIDI_BACKEND_LOG_PATH"))
+	if logPath == "" {
+		return message
+	}
+	hint := "See logs: " + logPath
+	if strings.Contains(message, hint) {
+		return message
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = domain.UserMessage(domain.ErrUnknown)
+	}
+	return message + " | " + hint
 }

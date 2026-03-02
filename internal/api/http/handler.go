@@ -326,7 +326,27 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, code domain.ErrorCode, message string) {
+	message = appendUnknownLogHint(code, message)
 	writeJSON(w, status, ErrorResponse{ErrorCode: string(code), Message: message})
+}
+
+func appendUnknownLogHint(code domain.ErrorCode, message string) string {
+	if code != domain.ErrUnknown {
+		return message
+	}
+	logPath := strings.TrimSpace(os.Getenv("YOU2MIDI_BACKEND_LOG_PATH"))
+	if logPath == "" {
+		return message
+	}
+	hint := "See logs: " + logPath
+	if strings.Contains(message, hint) {
+		return message
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return hint
+	}
+	return message + " | " + hint
 }
 
 func toJobProgress(job *domain.Job) JobProgress {

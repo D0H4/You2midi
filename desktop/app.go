@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ type App struct {
 	backendBaseURL string
 	statusMu       sync.RWMutex
 	lastBackendErr string
+	backendLogPath string
 	runtimeMu      sync.Mutex
 }
 
@@ -155,14 +157,19 @@ func (a *App) BackendOfflineReason() string {
 		if resp.StatusCode == http.StatusOK {
 			return "Backend is healthy."
 		}
-		return fmt.Sprintf("Health check failed: HTTP %d", resp.StatusCode)
+		return a.appendBackendLogHint(fmt.Sprintf("Health check failed: HTTP %d", resp.StatusCode))
 	}
 
 	lastErr := strings.TrimSpace(a.getLastBackendErr())
 	if lastErr != "" {
-		return lastErr
+		return a.appendBackendLogHint(lastErr)
 	}
-	return fmt.Sprintf("Health check failed: %v", err)
+	return a.appendBackendLogHint(fmt.Sprintf("Health check failed: %v", err))
+}
+
+// BackendLogPath returns the backend log file path for troubleshooting.
+func (a *App) BackendLogPath() string {
+	return strings.TrimSpace(a.getBackendLogPath())
 }
 
 func (a *App) startBackend() error {
@@ -195,6 +202,9 @@ func (a *App) startBackend() error {
 		return wrapped
 	}
 
+	backendLogPath := strings.TrimSpace(a.resolveBackendLogPath(filepath.Dir(backendPath)))
+	a.setBackendLogPath(backendLogPath)
+
 	cmd := exec.Command(backendPath, "-config", configPath)
 	cmd.Dir = workDir
 
@@ -224,6 +234,9 @@ func (a *App) startBackend() error {
 	env = setEnvValue(env, "YOU2MIDI_HOST", "127.0.0.1")
 	env = setEnvValue(env, "YOU2MIDI_ALLOWED_ORIGINS", "*")
 	env = setEnvValue(env, "YOU2MIDI_WORKSPACE_ROOT", workspaceRoot)
+	if backendLogPath != "" {
+		env = setEnvValue(env, "YOU2MIDI_BACKEND_LOG_PATH", backendLogPath)
+	}
 	if pythonScripts != "" {
 		env = prependEnvPath(env, pythonScripts)
 		pythonBin := filepath.Join(pythonScripts, binaryWithExe("python"))
@@ -257,14 +270,31 @@ func (a *App) startBackend() error {
 		env = setEnvValue(env, "CUDA_HOME", cudaRoot)
 	}
 	cmd.Env = env
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+
+	var backendLogFile *os.File
+	if backendLogPath != "" {
+		file, openErr := os.OpenFile(backendLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if openErr != nil {
+			a.setLastBackendErr(fmt.Sprintf("open backend log file failed: %v", openErr))
+		} else {
+			backendLogFile = file
+			cmd.Stdout = io.MultiWriter(os.Stdout, file)
+			cmd.Stderr = io.MultiWriter(os.Stderr, file)
+		}
+	}
+	if backendLogFile == nil {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 
 	if runtime.GOOS == "windows" {
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	}
 
 	if err := cmd.Start(); err != nil {
+		if backendLogFile != nil {
+			_ = backendLogFile.Close()
+		}
 		wrapped := fmt.Errorf("start backend process: %w", err)
 		a.setLastBackendErr(wrapped.Error())
 		a.publishRuntimeBootstrap("error", "backend", wrapped.Error())
@@ -274,6 +304,9 @@ func (a *App) startBackend() error {
 	exitCh := make(chan error, 1)
 	go func() {
 		waitErr := cmd.Wait()
+		if backendLogFile != nil {
+			_ = backendLogFile.Close()
+		}
 		if waitErr != nil {
 			msg := fmt.Sprintf("backend process exited: %v", waitErr)
 			a.setLastBackendErr(msg)
@@ -694,6 +727,55 @@ func (a *App) getLastBackendErr() string {
 	a.statusMu.RLock()
 	defer a.statusMu.RUnlock()
 	return a.lastBackendErr
+}
+
+func (a *App) setBackendLogPath(path string) {
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	a.backendLogPath = strings.TrimSpace(path)
+}
+
+func (a *App) getBackendLogPath() string {
+	a.statusMu.RLock()
+	defer a.statusMu.RUnlock()
+	return a.backendLogPath
+}
+
+func (a *App) appendBackendLogHint(message string) string {
+	message = strings.TrimSpace(message)
+	logPath := strings.TrimSpace(a.getBackendLogPath())
+	if logPath == "" {
+		return message
+	}
+	hint := "See logs: " + logPath
+	if strings.Contains(message, hint) {
+		return message
+	}
+	if message == "" {
+		return hint
+	}
+	return message + " | " + hint
+}
+
+func (a *App) resolveBackendLogPath(backendDir string) string {
+	candidates := []string{
+		filepath.Join(backendDir, "logs"),
+		filepath.Join(backendDir, "..", "logs"),
+	}
+	if appDataDir, err := a.AppDataDir(); err == nil && strings.TrimSpace(appDataDir) != "" {
+		candidates = append(candidates, filepath.Join(appDataDir, "logs"))
+	}
+
+	for _, dir := range candidates {
+		clean := filepath.Clean(strings.TrimSpace(dir))
+		if clean == "" {
+			continue
+		}
+		if err := os.MkdirAll(clean, 0o755); err == nil {
+			return filepath.Join(clean, "backend.log")
+		}
+	}
+	return ""
 }
 
 func (a *App) publishRuntimeBootstrap(status string, stage string, message string) {
