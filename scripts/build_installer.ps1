@@ -57,7 +57,7 @@ $updaterExePath = Join-Path $srcPath "you2midi-updater.exe"
 if (-not (Test-Path $updaterExePath)) {
     if (-not (Stop-OrWarn "Updater executable '$updaterExePath' not found. Run desktop build first.")) { exit 0 }
 }
-$launcherExePath = Join-Path $srcPath "you2midi-launcher.exe"
+$launcherExePath = Join-Path $srcPath "You2midi.exe"
 if (-not (Test-Path $launcherExePath)) {
     if (-not (Stop-OrWarn "Launcher executable '$launcherExePath' not found. Run desktop build first.")) { exit 0 }
 }
@@ -69,13 +69,21 @@ if (-not (Test-Path $launcherConfigPath)) {
         if (-not (Stop-OrWarn "Launcher config generation failed for '$launcherConfigPath'.")) { exit 0 }
     }
 }
+$packagedConfigPath = Join-Path $srcPath "config.toml"
+if (-not (Test-Path $packagedConfigPath)) {
+    if (-not (Stop-OrWarn "Packaged config '$packagedConfigPath' not found. Run desktop build first.")) { exit 0 }
+}
 
 $venvScriptsDir = Join-Path $srcPath "runtime/venv/Scripts"
 $runtimeManifestPath = Join-Path $srcPath "runtime/python-runtime.json"
+$runtimePythonDir = Join-Path $srcPath "runtime/python"
 $hasBundledVenv = Test-Path (Join-Path $venvScriptsDir "python.exe")
 $hasRemoteRuntimeManifest = Test-Path $runtimeManifestPath
 if (-not $hasBundledVenv -and -not $hasRemoteRuntimeManifest) {
     if (-not (Stop-OrWarn "No Python runtime found. Expected either '$venvScriptsDir\\python.exe' or '$runtimeManifestPath'.")) { exit 0 }
+}
+if ($hasRemoteRuntimeManifest -and (Test-Path $runtimePythonDir)) {
+    Write-Warning "Remote runtime manifest mode detected with stale '$runtimePythonDir'. Installer script excludes runtime/python for remote mode."
 }
 if ($hasBundledVenv) {
     foreach ($runtimeExe in @("python.exe", "transkun.exe", "yt-dlp.exe")) {
@@ -104,11 +112,36 @@ if (-not (Test-Path $InstallerScript)) {
     throw "Installer script '$InstallerScript' not found."
 }
 
+function Remove-StaleRemoteRuntime {
+    param([string]$RootPath)
+    foreach ($rel in @("runtime/python", "runtime/python.new", "runtime/python.old")) {
+        $target = Join-Path $RootPath $rel
+        if (Test-Path $target) {
+            Remove-Item -Path $target -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path $target) {
+                throw "Failed to remove stale remote runtime payload from staged source: $target"
+            }
+            Write-Host "Removed remote runtime payload from staged source: $target"
+        }
+    }
+}
+
+$effectiveSourceDir = $srcPath
+$stageDir = $null
+if ($hasRemoteRuntimeManifest) {
+    $stageDir = Join-Path $env:TEMP ("you2midi-installer-stage-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+    Write-Host "Staging installer source for remote runtime mode..."
+    Copy-Item -Path (Join-Path $srcPath "*") -Destination $stageDir -Recurse -Force
+    Remove-StaleRemoteRuntime -RootPath $stageDir
+    $effectiveSourceDir = (Resolve-Path $stageDir).Path
+}
+
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $outPath = Resolve-Path $OutDir
 
 $args = @(
-    "/DSourceDir=$srcPath",
+    "/DSourceDir=$effectiveSourceDir",
     "/DMyAppVersion=$AppVersion",
     "/O$outPath",
     $InstallerScript
@@ -122,9 +155,15 @@ if ($env:INNO_SIGNTOOL) {
 }
 
 Write-Host "Building installer with Inno Setup..."
-& $isccPath @args
-if ($LASTEXITCODE -ne 0) {
-    throw "iscc failed with exit code $LASTEXITCODE"
+try {
+    & $isccPath @args
+    if ($LASTEXITCODE -ne 0) {
+        throw "iscc failed with exit code $LASTEXITCODE"
+    }
+} finally {
+    if ($stageDir -and (Test-Path $stageDir)) {
+        Remove-Item -Path $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host "Installer build complete. Output directory: $outPath"

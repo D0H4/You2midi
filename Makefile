@@ -46,7 +46,7 @@ updater-build:
 
 ## Build standalone launcher executable into dist/desktop
 launcher-build:
-	go build -o dist/desktop/you2midi-launcher.exe ./cmd/launcher
+	go build -o dist/desktop/You2midi.exe ./cmd/launcher
 
 ## Build a lightweight patch ZIP from selected desktop artifacts
 patch-build:

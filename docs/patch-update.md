@@ -13,7 +13,7 @@ make patch-build
 ```
 
 Default patch contents:
-- `you2midi-launcher.exe`
+- `You2midi.exe`
 - `launcher-config.json`
 - `you2midi-desktop.exe`
 - `you2midi-backend.exe`

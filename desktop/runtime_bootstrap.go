@@ -51,6 +51,7 @@ type runtimeDepsMarker struct {
 func (a *App) resolvePythonRuntimeScripts(backendDir string) (string, error) {
 	// Backward-compatible legacy layout.
 	if scripts := findBundledVenvScripts(backendDir); scripts != "" {
+		a.publishRuntimeBootstrap("running", "runtime", "내장 Python 런타임을 확인하는 중입니다.")
 		return scripts, nil
 	}
 	manifestPath, runtimeRoot := findPythonRuntimeManifest(backendDir)
@@ -83,16 +84,32 @@ func (a *App) resolvePythonRuntimeScripts(backendDir string) (string, error) {
 		return "", fmt.Errorf("unsupported python runtime archive_type %q (supported: zip, tar.gz)", archiveType)
 	}
 
+	if scripts != "" {
+		if healthy, reason := pythonRuntimeHealthy(runtimeRoot, scripts); !healthy {
+			if a.ctx != nil {
+				wruntime.LogWarning(a.ctx, fmt.Sprintf("python runtime appears corrupted; reprovisioning: %s", reason))
+			}
+			a.publishRuntimeBootstrap("running", "repair", "Python 런타임 상태가 손상되어 복구를 시작합니다.")
+			_ = os.Remove(filepath.Join(runtimeRoot, runtimeDepsMarkerFile))
+			scripts = ""
+		}
+	}
+
 	if scripts == "" {
 		if a.ctx != nil {
 			wruntime.LogInfo(a.ctx, "python runtime missing; provisioning from remote archive")
 		}
+		a.publishRuntimeBootstrap("running", "download", "Python 런타임을 다운로드하는 중입니다.")
 		if err := provisionPythonRuntime(runtimeRoot, manifest, archiveType); err != nil {
 			return "", err
 		}
+		a.publishRuntimeBootstrap("running", "extract", "Python 런타임 파일을 설치하는 중입니다.")
 		scripts = findBundledPythonScripts(backendDir)
 		if scripts == "" {
 			return "", fmt.Errorf("python runtime provisioned but scripts dir not found under %s", runtimeRoot)
+		}
+		if healthy, reason := pythonRuntimeHealthy(runtimeRoot, scripts); !healthy {
+			return "", fmt.Errorf("python runtime provisioned but health check failed: %s", reason)
 		}
 	}
 
@@ -135,6 +152,11 @@ func findBundledPythonScripts(backendDir string) string {
 			continue
 		}
 		if fileExists(filepath.Join(scripts, binaryWithExe("python"))) {
+			return scripts
+		}
+		// python-build-standalone install_only layout keeps python.exe at runtime root
+		// and scripts in runtimeRoot/Scripts.
+		if fileExists(filepath.Join(candidate, binaryWithExe("python"))) {
 			return scripts
 		}
 	}
@@ -253,8 +275,15 @@ func resolveRuntimeRootFromExtract(extractDir string, scriptsRel string) (string
 	}
 
 	for _, scriptsPath := range candidates {
-		if dirExists(scriptsPath) && fileExists(filepath.Join(scriptsPath, binaryWithExe("python"))) {
+		if !dirExists(scriptsPath) {
+			continue
+		}
+		if fileExists(filepath.Join(scriptsPath, binaryWithExe("python"))) {
 			return filepath.Dir(scriptsPath), nil
+		}
+		parent := filepath.Dir(scriptsPath)
+		if fileExists(filepath.Join(parent, binaryWithExe("python"))) {
+			return parent, nil
 		}
 	}
 	return "", fmt.Errorf("runtime archive does not contain %q with python executable", scriptsRel)
@@ -487,28 +516,36 @@ func copyDir(src string, dst string) error {
 }
 
 func (a *App) ensurePythonRuntimeDependencies(runtimeRoot string, scriptsDir string, manifest *pythonRuntimeManifest) error {
-	pythonBin := filepath.Join(scriptsDir, binaryWithExe("python"))
-	if !fileExists(pythonBin) {
-		return fmt.Errorf("python executable not found at %s", pythonBin)
+	pythonBin := resolvePythonExecutable(runtimeRoot, scriptsDir)
+	if pythonBin == "" {
+		return fmt.Errorf("python executable not found under %s", runtimeRoot)
+	}
+	if !pythonStdlibPresent(runtimeRoot) {
+		return fmt.Errorf("python stdlib missing under %s (expected Lib/encodings or python*.zip)", runtimeRoot)
 	}
 	if runtimeDepsReady(runtimeRoot, scriptsDir, manifest.Version, pythonBin) {
+		a.publishRuntimeBootstrap("running", "deps", "필수 런타임이 이미 설치되어 있습니다.")
 		return nil
 	}
 
 	if a.ctx != nil {
 		wruntime.LogInfo(a.ctx, "installing python runtime dependencies (first run)")
 	}
+	a.publishRuntimeBootstrap("running", "deps", "Python 패키지 설치를 준비하는 중입니다.")
 
 	// Ensure pip exists.
+	a.publishRuntimeBootstrap("running", "pip", "pip 환경을 점검하는 중입니다.")
 	if err := runPython(pythonBin, 2*time.Minute, "-m", "pip", "--version"); err != nil {
 		if a.ctx != nil {
 			wruntime.LogInfo(a.ctx, "pip not found, running ensurepip")
 		}
+		a.publishRuntimeBootstrap("running", "pip", "pip을 초기화하는 중입니다.")
 		if ensureErr := runPython(pythonBin, 5*time.Minute, "-m", "ensurepip", "--upgrade"); ensureErr != nil {
 			return fmt.Errorf("ensure pip: %w", ensureErr)
 		}
 	}
 
+	a.publishRuntimeBootstrap("running", "pip-tools", "pip/wheel/setuptools를 업데이트하는 중입니다.")
 	if err := runPython(
 		pythonBin,
 		10*time.Minute,
@@ -523,6 +560,7 @@ func (a *App) ensurePythonRuntimeDependencies(runtimeRoot string, scriptsDir str
 	if a.ctx != nil {
 		wruntime.LogInfo(a.ctx, "installing torch/torchaudio runtime (this may take several minutes)")
 	}
+	a.publishRuntimeBootstrap("running", "torch", "AI 런타임(torch/torchaudio)을 설치하는 중입니다. 시간이 오래 걸릴 수 있습니다.")
 	if err := runPython(
 		pythonBin,
 		60*time.Minute,
@@ -538,6 +576,7 @@ func (a *App) ensurePythonRuntimeDependencies(runtimeRoot string, scriptsDir str
 	if a.ctx != nil {
 		wruntime.LogInfo(a.ctx, "installing transcription dependencies")
 	}
+	a.publishRuntimeBootstrap("running", "tools", "transkun/yt-dlp를 설치하는 중입니다.")
 	if err := runPython(
 		pythonBin,
 		45*time.Minute,
@@ -549,6 +588,7 @@ func (a *App) ensurePythonRuntimeDependencies(runtimeRoot string, scriptsDir str
 	}
 
 	// Verify imports at end to avoid false-ready marker.
+	a.publishRuntimeBootstrap("running", "verify", "설치 결과를 검증하는 중입니다.")
 	if err := runPython(
 		pythonBin,
 		2*time.Minute,
@@ -569,10 +609,18 @@ func (a *App) ensurePythonRuntimeDependencies(runtimeRoot string, scriptsDir str
 	if a.ctx != nil {
 		wruntime.LogInfo(a.ctx, "python runtime dependencies installed successfully")
 	}
+	a.publishRuntimeBootstrap("done", "deps", "Python/AI 런타임 설치가 완료되었습니다.")
 	return nil
 }
 
 func runtimeDepsReady(runtimeRoot string, scriptsDir string, runtimeVersion string, pythonBin string) bool {
+	if !fileExists(pythonBin) {
+		return false
+	}
+	if !pythonStdlibPresent(runtimeRoot) {
+		return false
+	}
+
 	markerPath := filepath.Join(runtimeRoot, runtimeDepsMarkerFile)
 	raw, err := os.ReadFile(markerPath)
 	if err != nil {
@@ -598,6 +646,41 @@ func runtimeDepsReady(runtimeRoot string, scriptsDir string, runtimeVersion stri
 		return false
 	}
 	return true
+}
+
+func resolvePythonExecutable(runtimeRoot string, scriptsDir string) string {
+	candidates := []string{
+		filepath.Join(scriptsDir, binaryWithExe("python")),
+		filepath.Join(runtimeRoot, binaryWithExe("python")),
+	}
+	for _, candidate := range candidates {
+		if fileExists(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func pythonStdlibPresent(runtimeRoot string) bool {
+	if fileExists(filepath.Join(runtimeRoot, "Lib", "encodings", "__init__.py")) {
+		return true
+	}
+	matches, err := filepath.Glob(filepath.Join(runtimeRoot, "python*.zip"))
+	return err == nil && len(matches) > 0
+}
+
+func pythonRuntimeHealthy(runtimeRoot string, scriptsDir string) (bool, string) {
+	pythonBin := resolvePythonExecutable(runtimeRoot, scriptsDir)
+	if pythonBin == "" {
+		return false, "python executable missing"
+	}
+	if !pythonStdlibPresent(runtimeRoot) {
+		return false, "stdlib missing (Lib/encodings and python*.zip not found)"
+	}
+	if err := runPython(pythonBin, 30*time.Second, "-c", "import encodings; import sys; print(sys.prefix)"); err != nil {
+		return false, fmt.Sprintf("python startup check failed: %v", err)
+	}
+	return true, ""
 }
 
 func writeRuntimeDepsMarker(runtimeRoot string, runtimeVersion string, pythonBin string) error {

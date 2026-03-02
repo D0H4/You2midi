@@ -66,6 +66,7 @@ func run() error {
 	appDirFlag := flag.String("app-dir", "", "override app directory")
 	skipUpdate := flag.Bool("skip-update", false, "skip update check")
 	flag.Parse()
+	reportStatus("Launcher started")
 
 	exePath, err := os.Executable()
 	if err != nil {
@@ -77,6 +78,7 @@ func run() error {
 	if cfgPath == "" {
 		cfgPath = filepath.Join(exeDir, "launcher-config.json")
 	}
+	reportStatus("Loading launcher config: %s", cfgPath)
 	cfg, err := loadLauncherConfig(cfgPath)
 	if err != nil {
 		return err
@@ -84,20 +86,26 @@ func run() error {
 
 	appDir, desktopExe := findInstalledDesktop(cfg, exeDir, strings.TrimSpace(*appDirFlag))
 	if appDir == "" {
+		reportStatus("Installed app not found; entering first-install flow")
 		return runFirstInstallFlow(cfg)
 	}
+	reportStatus("Installed app found: %s", appDir)
 
 	if !*skipUpdate {
+		reportStatus("Checking updates from GitHub Releases")
 		updated, err := tryStartUpdater(cfg, appDir)
 		if err != nil {
-			_ = showInfo("You2Midi Launcher", "업데이트 확인에 실패하여 기존 버전으로 실행합니다.\n\n"+err.Error())
+			reportStatus("Update check failed: %v", err)
+			_ = showInfo("You2Midi Launcher", "업데이트 확인에 실패하여 현재 버전으로 실행합니다.\n\n"+err.Error())
 		}
 		if updated {
-			// Updater waits for launcher exit, patches, then launches desktop app.
+			reportStatus("Updater started; launcher exits now")
 			return nil
 		}
 	}
 
+	notifyFirstRunRuntimeBootstrap(appDir)
+	reportStatus("Launching desktop app: %s", desktopExe)
 	return launchExecutable(desktopExe, appDir)
 }
 
@@ -201,6 +209,7 @@ func runFirstInstallFlow(cfg *launcherConfig) error {
 	if strings.TrimSpace(cfg.GitHubRepo) == "" {
 		return errors.New("app is not installed and github_repo is missing in launcher-config.json")
 	}
+	reportStatus("First install: fetching latest release for %s", cfg.GitHubRepo)
 
 	release, err := fetchLatestRelease(cfg)
 	if err != nil {
@@ -213,6 +222,7 @@ func runFirstInstallFlow(cfg *launcherConfig) error {
 	if installerAsset == nil {
 		return fmt.Errorf("installer asset not found (pattern: %s)", cfg.InstallerAssetPattern)
 	}
+	reportStatus("First install: installer asset found: %s", installerAsset.Name)
 
 	message := fmt.Sprintf("You2Midi가 설치되어 있지 않습니다.\n지금 설치하시겠습니까?\n\n릴리즈: %s", strings.TrimSpace(release.TagName))
 	proceed, err := askYesNo("You2Midi 설치", message)
@@ -220,9 +230,12 @@ func runFirstInstallFlow(cfg *launcherConfig) error {
 		return err
 	}
 	if !proceed {
+		reportStatus("First install: user cancelled")
 		return nil
 	}
 
+	reportStatus("First install: downloading installer from %s", installerAsset.BrowserDownloadURL)
+	_ = showInfo("You2Midi 설치", "설치 파일 다운로드를 시작합니다.\n진행 상황은 콘솔/launcher.log에서 확인할 수 있습니다.")
 	downloadPath, cleanup, err := downloadAsset(installerAsset, requestTimeout(cfg))
 	if cleanup != nil {
 		defer cleanup()
@@ -230,11 +243,15 @@ func runFirstInstallFlow(cfg *launcherConfig) error {
 	if err != nil {
 		return err
 	}
+	reportStatus("First install: installer downloaded: %s", downloadPath)
 
+	reportStatus("First install: running installer")
+	_ = showInfo("You2Midi 설치", "설치 프로그램을 실행합니다.")
 	if err := runInstaller(downloadPath); err != nil {
 		return err
 	}
 
+	reportStatus("First install: installer finished")
 	_ = showInfo("You2Midi 설치", "설치가 완료되었습니다.\nLauncher를 다시 실행하면 You2Midi가 실행됩니다.")
 	return nil
 }
@@ -244,6 +261,7 @@ func tryStartUpdater(cfg *launcherConfig, appDir string) (bool, error) {
 		return false, nil
 	}
 
+	reportStatus("Update: fetching latest release for %s", cfg.GitHubRepo)
 	release, err := fetchLatestRelease(cfg)
 	if err != nil {
 		return false, err
@@ -253,21 +271,29 @@ func tryStartUpdater(cfg *launcherConfig, appDir string) (bool, error) {
 		return false, nil
 	}
 	if patchAsset == nil {
+		reportStatus("Update: patch asset not found in latest release")
 		return false, nil
 	}
+	reportStatus("Update: patch asset found: %s", patchAsset.Name)
 
 	statePath := launcherStatePath()
 	state, _ := readLauncherState(statePath)
 	if strings.TrimSpace(release.TagName) != "" && state.LastReleaseTag == strings.TrimSpace(release.TagName) {
+		reportStatus("Update: already applied release %s, skipping", strings.TrimSpace(release.TagName))
 		return false, nil
 	}
 
 	updaterPath := filepath.Join(appDir, cfg.UpdaterExecutable)
 	if !fileExists(updaterPath) {
+		reportStatus("Update: updater binary not found: %s", updaterPath)
 		return false, nil
 	}
 
 	logPath := launcherUpdaterLogPath()
+	reportStatus("Update: starting updater")
+	reportStatus("Update: patch URL: %s", patchAsset.BrowserDownloadURL)
+	reportStatus("Update: updater log: %s", logPath)
+	_ = showInfo("You2Midi 업데이트", "패치 적용을 시작합니다.\n진행 상황은 콘솔 또는 updater.log에서 확인할 수 있습니다.")
 	if err := startUpdater(updaterPath, appDir, cfg.AppExecutable, patchAsset.BrowserDownloadURL, logPath, statePath, strings.TrimSpace(release.TagName)); err != nil {
 		return false, err
 	}
@@ -428,7 +454,6 @@ func runInstaller(installerPath string) error {
 	cmd.Dir = filepath.Dir(installerPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	applyPlatformStartAttrs(cmd)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("run installer: %w", err)
 	}
@@ -445,7 +470,7 @@ func startUpdater(updaterPath string, appDir string, launchExecutable string, pa
 	if strings.TrimSpace(logPath) != "" {
 		args = append(args, "-log-file", logPath)
 	}
-	if strings.TrimSpace(statePath) != "" && strings.TrimSpace(releaseTag) != "" {
+	if updaterSupportsStateFlags(updaterPath) && strings.TrimSpace(statePath) != "" && strings.TrimSpace(releaseTag) != "" {
 		args = append(args, "-state-file", statePath, "-state-release-tag", strings.TrimSpace(releaseTag))
 	}
 
@@ -453,11 +478,26 @@ func startUpdater(updaterPath string, appDir string, launchExecutable string, pa
 	cmd.Dir = appDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	applyPlatformStartAttrs(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start updater process: %w", err)
 	}
 	return nil
+}
+
+func updaterSupportsStateFlags(updaterPath string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, updaterPath, "-h")
+	output, err := cmd.CombinedOutput()
+	text := strings.ToLower(string(output))
+	if strings.Contains(text, "state-file") && strings.Contains(text, "state-release-tag") {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return false
 }
 
 func launchExecutable(executablePath string, workDir string) error {
@@ -468,7 +508,6 @@ func launchExecutable(executablePath string, workDir string) error {
 	cmd.Dir = workDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	applyPlatformStartAttrs(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("launch desktop executable: %w", err)
 	}
@@ -499,6 +538,52 @@ func launcherUpdaterLogPath() string {
 	return filepath.Join(base, "You2Midi", "logs", "updater.log")
 }
 
+func launcherLogPath() string {
+	base := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+	if base == "" {
+		home, _ := os.UserHomeDir()
+		if home == "" {
+			return ""
+		}
+		base = filepath.Join(home, "AppData", "Local")
+	}
+	return filepath.Join(base, "You2Midi", "logs", "launcher.log")
+}
+
+func notifyFirstRunRuntimeBootstrap(appDir string) {
+	manifestPath := filepath.Join(appDir, "runtime", "python-runtime.json")
+	markerPath := filepath.Join(appDir, "runtime", "python", ".deps_ready.json")
+	if !fileExists(manifestPath) || fileExists(markerPath) {
+		return
+	}
+	reportStatus("Runtime bootstrap pending (marker missing): %s", markerPath)
+	_ = showInfo(
+		"You2Midi 초기 설정",
+		"최초 실행에서는 Python/AI 런타임 설치가 진행됩니다.\n"+
+			"네트워크 환경에 따라 5~20분 이상 걸릴 수 있습니다.\n"+
+			"설치가 끝나면 You2Midi 창이 자동으로 열립니다.",
+	)
+}
+
+func reportStatus(format string, v ...any) {
+	msg := fmt.Sprintf(format, v...)
+	line := fmt.Sprintf("[%s] %s", time.Now().Format("2006-01-02 15:04:05"), msg)
+	_, _ = fmt.Fprintln(os.Stdout, line)
+
+	logPath := launcherLogPath()
+	if strings.TrimSpace(logPath) == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintln(f, line)
+}
 func readLauncherState(path string) (*launcherState, error) {
 	if strings.TrimSpace(path) == "" {
 		return &launcherState{}, nil

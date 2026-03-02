@@ -8,15 +8,47 @@
   let backendStatusTitle = $state('Check backend status');
   let headerEl: HTMLElement | null = null;
   let healthTimer: ReturnType<typeof setInterval> | null = null;
+  let runtimeBannerHideTimer: ReturnType<typeof setTimeout> | null = null;
+  let runtimeBootstrap = $state<{
+    status: 'running' | 'done' | 'error';
+    stage: string;
+    message: string;
+  } | null>(null);
 
   type WailsAppBridge = {
     BackendOfflineReason?: () => Promise<string>;
+  };
+
+  type WailsRuntimeBridge = {
+    EventsOn?: (eventName: string, callback: (payload: unknown) => void) => unknown;
+    EventsOff?: (eventName: string, ...additional: string[]) => unknown;
   };
 
   function appBridge(): WailsAppBridge | null {
     if (typeof window === 'undefined') return null;
     const w = window as Window & { go?: { main?: { App?: WailsAppBridge } } };
     return w.go?.main?.App ?? null;
+  }
+
+  function runtimeBridge(): WailsRuntimeBridge | null {
+    if (typeof window === 'undefined') return null;
+    const w = window as Window & { runtime?: WailsRuntimeBridge };
+    return w.runtime ?? null;
+  }
+
+  function parseRuntimeBootstrapPayload(raw: unknown): {
+    status: 'running' | 'done' | 'error';
+    stage: string;
+    message: string;
+  } | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const r = raw as Record<string, unknown>;
+    const status = String(r.status ?? '').trim();
+    const stage = String(r.stage ?? '').trim();
+    const message = String(r.message ?? '').trim();
+    if (status !== 'running' && status !== 'done' && status !== 'error') return null;
+    if (!message) return null;
+    return { status, stage, message };
   }
 
   function extractErrorMessage(err: unknown): string {
@@ -55,6 +87,7 @@
 
   onMount(() => {
     let disposed = false;
+    const rt = runtimeBridge();
 
     const syncHeaderHeight = () => {
       if (!headerEl) return;
@@ -63,6 +96,24 @@
 
     syncHeaderHeight();
     window.addEventListener('resize', syncHeaderHeight);
+
+    if (rt?.EventsOn) {
+      rt.EventsOn('you2midi:runtime-bootstrap', (payload: unknown) => {
+        const parsed = parseRuntimeBootstrapPayload(payload);
+        if (!parsed) return;
+        runtimeBootstrap = parsed;
+        backendStatusTitle = parsed.message;
+        if (runtimeBannerHideTimer) {
+          clearTimeout(runtimeBannerHideTimer);
+          runtimeBannerHideTimer = null;
+        }
+        if (parsed.status === 'done') {
+          runtimeBannerHideTimer = setTimeout(() => {
+            runtimeBootstrap = null;
+          }, 3500);
+        }
+      });
+    }
 
     void checkServerHealth();
     healthTimer = setInterval(() => {
@@ -73,6 +124,8 @@
       disposed = true;
       window.removeEventListener('resize', syncHeaderHeight);
       if (healthTimer) clearInterval(healthTimer);
+      if (runtimeBannerHideTimer) clearTimeout(runtimeBannerHideTimer);
+      if (rt?.EventsOff) rt.EventsOff('you2midi:runtime-bootstrap');
     };
   });
 </script>
@@ -106,6 +159,24 @@
       </div>
     </div>
   </header>
+
+  {#if runtimeBootstrap}
+    <div class="runtime-banner" class:done={runtimeBootstrap.status === 'done'} class:error={runtimeBootstrap.status === 'error'}>
+      <span class="runtime-dot"></span>
+      <div class="runtime-text">
+        <strong>
+          {#if runtimeBootstrap.status === 'running'}
+            Runtime Installing
+          {:else if runtimeBootstrap.status === 'done'}
+            Runtime Ready
+          {:else}
+            Runtime Error
+          {/if}
+        </strong>
+        <span>{runtimeBootstrap.message}</span>
+      </div>
+    </div>
+  {/if}
 
   <main class="main-content">
     {@render children()}
@@ -207,5 +278,65 @@
   .main-content {
     flex: 1;
     padding: 0 0 4rem;
+  }
+
+  .runtime-banner {
+    position: sticky;
+    top: calc(var(--app-header-height) + 8px);
+    z-index: 95;
+    margin: 0.6rem auto 0;
+    width: min(900px, calc(100% - 2rem));
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.7rem 0.9rem;
+    border-radius: 12px;
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    background: rgba(30, 64, 175, 0.2);
+    color: #dbeafe;
+    backdrop-filter: blur(10px);
+  }
+  .runtime-banner.done {
+    border-color: rgba(16, 185, 129, 0.35);
+    background: rgba(16, 185, 129, 0.16);
+    color: #d1fae5;
+  }
+  .runtime-banner.error {
+    border-color: rgba(239, 68, 68, 0.4);
+    background: rgba(127, 29, 29, 0.28);
+    color: #fee2e2;
+  }
+  .runtime-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #60a5fa;
+    box-shadow: 0 0 10px rgba(96, 165, 250, 0.8);
+    animation: pulse-dot 1.4s ease-in-out infinite;
+    flex: 0 0 auto;
+  }
+  .runtime-banner.done .runtime-dot {
+    background: #34d399;
+    box-shadow: 0 0 10px rgba(52, 211, 153, 0.8);
+    animation: none;
+  }
+  .runtime-banner.error .runtime-dot {
+    background: #f87171;
+    box-shadow: 0 0 10px rgba(248, 113, 113, 0.8);
+    animation: none;
+  }
+  .runtime-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+    gap: 0.15rem;
+  }
+  .runtime-text strong {
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+  }
+  .runtime-text span {
+    font-size: 0.8rem;
+    opacity: 0.95;
   }
 </style>

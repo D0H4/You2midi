@@ -29,15 +29,15 @@ SignTool={#SignToolName}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "runtime\python\*;runtime\python.new\*;runtime\python.old\*"
 
 [Icons]
-Name: "{group}\You2Midi"; Filename: "{app}\you2midi-launcher.exe"
-Name: "{commondesktop}\You2Midi"; Filename: "{app}\you2midi-launcher.exe"
+Name: "{group}\You2Midi"; Filename: "{app}\You2midi.exe"
+Name: "{commondesktop}\You2Midi"; Filename: "{app}\You2midi.exe"
 
 [Run]
 Filename: "{app}\runtime\webview2\MicrosoftEdgeWebView2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft Edge WebView2 Runtime..."; Flags: runhidden waituntilterminated; Check: NeedInstallWebView2
-Filename: "{app}\you2midi-launcher.exe"; Description: "Launch You2Midi"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\You2midi.exe"; Description: "Launch You2Midi"; Flags: nowait postinstall skipifsilent
 
 [Code]
 const

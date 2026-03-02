@@ -28,6 +28,25 @@ type App struct {
 	runtimeMu      sync.Mutex
 }
 
+type runtimeBootstrapEvent struct {
+	Status       string `json:"status"`
+	Stage        string `json:"stage"`
+	Message      string `json:"message"`
+	UpdatedAtUTC string `json:"updated_at_utc"`
+}
+
+const defaultDesktopConfigTOML = `# You2Midi desktop runtime configuration
+schema_version = 1
+
+[engine]
+  device              = "auto"  # auto | cpu | cuda
+  max_attempts        = 3
+  max_concurrent_jobs = 2
+  max_concurrent_cpu  = 1
+  max_concurrent_gpu  = 1
+  queue_size          = 128
+`
+
 func NewApp() *App {
 	return &App{
 		backendBaseURL: "http://127.0.0.1:8080",
@@ -47,6 +66,10 @@ func (a *App) startup(ctx context.Context) {
 func (a *App) beforeClose(_ context.Context) bool {
 	a.stopBackend()
 	return false
+}
+
+func (a *App) shutdown(_ context.Context) {
+	a.stopBackend()
 }
 
 // Ping is a simple sanity check for desktop frontend integration.
@@ -143,29 +166,43 @@ func (a *App) BackendOfflineReason() string {
 }
 
 func (a *App) startBackend() error {
+	a.publishRuntimeBootstrap("running", "startup", "앱 초기 설정을 준비하는 중입니다.")
 	backendPath, err := findBackendBinary()
 	if err != nil {
 		a.setLastBackendErr(err.Error())
+		a.publishRuntimeBootstrap("error", "startup", err.Error())
 		return err
 	}
 	workspaceRoot, err := a.desktopWorkspaceRoot()
 	if err != nil {
 		a.setLastBackendErr(err.Error())
+		a.publishRuntimeBootstrap("error", "startup", err.Error())
 		return err
 	}
 	if err := os.MkdirAll(workspaceRoot, 0o750); err != nil {
 		wrapped := fmt.Errorf("create desktop workspace: %w", err)
 		a.setLastBackendErr(wrapped.Error())
+		a.publishRuntimeBootstrap("error", "workspace", wrapped.Error())
 		return wrapped
 	}
 
-	cmd := exec.Command(backendPath)
-	cmd.Dir = chooseBackendWorkingDir(filepath.Dir(backendPath))
+	workDir := chooseBackendWorkingDir(filepath.Dir(backendPath))
+	configPath, err := a.ensureDesktopConfig(workDir)
+	if err != nil {
+		wrapped := fmt.Errorf("ensure desktop config: %w", err)
+		a.setLastBackendErr(wrapped.Error())
+		a.publishRuntimeBootstrap("error", "config", wrapped.Error())
+		return wrapped
+	}
+
+	cmd := exec.Command(backendPath, "-config", configPath)
+	cmd.Dir = workDir
 
 	pythonScripts, err := a.resolvePythonRuntimeScripts(filepath.Dir(backendPath))
 	if err != nil {
 		wrapped := fmt.Errorf("resolve python runtime: %w", err)
 		a.setLastBackendErr(wrapped.Error())
+		a.publishRuntimeBootstrap("error", "runtime", wrapped.Error())
 		return wrapped
 	}
 
@@ -175,7 +212,15 @@ func (a *App) startBackend() error {
 	env = setEnvValue(env, "YOU2MIDI_WORKSPACE_ROOT", workspaceRoot)
 	if pythonScripts != "" {
 		env = prependEnvPath(env, pythonScripts)
-		if pythonBin := filepath.Join(pythonScripts, binaryWithExe("python")); fileExists(pythonBin) {
+		pythonBin := filepath.Join(pythonScripts, binaryWithExe("python"))
+		if !fileExists(pythonBin) {
+			runtimeRoot := runtimeRootFromScriptsDir(pythonScripts)
+			alt := filepath.Join(runtimeRoot, binaryWithExe("python"))
+			if fileExists(alt) {
+				pythonBin = alt
+			}
+		}
+		if fileExists(pythonBin) {
 			env = setEnvValue(env, "YOU2MIDI_PYTHON_BIN", pythonBin)
 		}
 		if transkunBin := filepath.Join(pythonScripts, binaryWithExe("transkun")); fileExists(transkunBin) {
@@ -204,6 +249,7 @@ func (a *App) startBackend() error {
 	if err := cmd.Start(); err != nil {
 		wrapped := fmt.Errorf("start backend process: %w", err)
 		a.setLastBackendErr(wrapped.Error())
+		a.publishRuntimeBootstrap("error", "backend", wrapped.Error())
 		return wrapped
 	}
 
@@ -225,6 +271,7 @@ func (a *App) startBackend() error {
 		<-exitCh
 		wrapped := fmt.Errorf("backend health check failed: %w", err)
 		a.setLastBackendErr(wrapped.Error())
+		a.publishRuntimeBootstrap("error", "health", wrapped.Error())
 		return wrapped
 	}
 
@@ -233,6 +280,7 @@ func (a *App) startBackend() error {
 	a.backendExitCh = exitCh
 	a.statusMu.Unlock()
 	a.setLastBackendErr("")
+	a.publishRuntimeBootstrap("done", "ready", "초기 설정이 완료되었습니다. 백엔드가 준비되었습니다.")
 	return nil
 }
 
@@ -414,6 +462,49 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
+func runtimeRootFromScriptsDir(scriptsDir string) string {
+	base := strings.ToLower(filepath.Base(scriptsDir))
+	if base == "scripts" || base == "bin" {
+		return filepath.Dir(scriptsDir)
+	}
+	return scriptsDir
+}
+
+func (a *App) ensureDesktopConfig(workDir string) (string, error) {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return "", errors.New("work directory is empty")
+	}
+
+	primaryPath := filepath.Join(workDir, "config.toml")
+	if fileExists(primaryPath) {
+		return primaryPath, nil
+	}
+
+	raw := []byte(defaultDesktopConfigTOML)
+	if err := os.WriteFile(primaryPath, raw, 0o644); err == nil {
+		return primaryPath, nil
+	}
+
+	// Fallback for read-only install directories (e.g. Program Files).
+	appDataDir, err := a.AppDataDir()
+	if err != nil {
+		return "", fmt.Errorf("write %s failed and app data unavailable: %w", primaryPath, err)
+	}
+	if mkErr := os.MkdirAll(appDataDir, 0o755); mkErr != nil {
+		return "", fmt.Errorf("create app data dir: %w", mkErr)
+	}
+
+	fallbackPath := filepath.Join(appDataDir, "config.toml")
+	if fileExists(fallbackPath) {
+		return fallbackPath, nil
+	}
+	if err := os.WriteFile(fallbackPath, raw, 0o644); err != nil {
+		return "", fmt.Errorf("write config fallback %s: %w", fallbackPath, err)
+	}
+	return fallbackPath, nil
+}
+
 func findBundledCUDARuntime(backendDir string) (binDir string, rootDir string) {
 	candidates := []string{
 		filepath.Join(backendDir, "runtime", "cuda"),
@@ -515,4 +606,27 @@ func (a *App) getLastBackendErr() string {
 	a.statusMu.RLock()
 	defer a.statusMu.RUnlock()
 	return a.lastBackendErr
+}
+
+func (a *App) publishRuntimeBootstrap(status string, stage string, message string) {
+	status = strings.TrimSpace(status)
+	stage = strings.TrimSpace(stage)
+	message = strings.TrimSpace(message)
+	if status == "" || message == "" {
+		return
+	}
+
+	if status == "running" {
+		a.setLastBackendErr("초기 설정 진행 중: " + message)
+	}
+
+	if a.ctx == nil {
+		return
+	}
+	wruntime.EventsEmit(a.ctx, "you2midi:runtime-bootstrap", runtimeBootstrapEvent{
+		Status:       status,
+		Stage:        stage,
+		Message:      message,
+		UpdatedAtUTC: time.Now().UTC().Format(time.RFC3339),
+	})
 }

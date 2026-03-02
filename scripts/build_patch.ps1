@@ -4,7 +4,7 @@ param(
     [string]$Version = "dev",
     [string]$LaunchExecutable = "you2midi-desktop.exe",
     [string[]]$IncludeFiles = @(
-        "you2midi-launcher.exe",
+        "You2midi.exe",
         "launcher-config.json",
         "you2midi-desktop.exe",
         "you2midi-backend.exe",
@@ -20,7 +20,7 @@ if (-not $resolvedSource) {
     throw "Patch source directory '$SourceDir' not found."
 }
 
-$launcherExe = Join-Path $resolvedSource "you2midi-launcher.exe"
+$launcherExe = Join-Path $resolvedSource "You2midi.exe"
 $launcherConfig = Join-Path $resolvedSource "launcher-config.json"
 if ((Test-Path $launcherExe) -and -not (Test-Path $launcherConfig)) {
     $repoRoot = Resolve-Path "."

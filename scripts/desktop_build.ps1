@@ -33,6 +33,12 @@ function Stop-OrWarn {
     return $false
 }
 
+function Stop-You2MidiRuntimeProcesses {
+    foreach ($name in @("You2midi", "you2midi-desktop", "you2midi-backend", "python", "pip")) {
+        Stop-Process -Name $name -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Resolve-VenvRoot {
     param([string]$InputPath)
     if (-not $InputPath) {
@@ -113,6 +119,26 @@ function Resolve-ArchiveType {
     return "auto"
 }
 
+function Write-PackagedConfig {
+    param([string]$OutputRoot)
+    $configPath = Join-Path $OutputRoot "config.toml"
+    $configText = @'
+# You2Midi desktop packaged configuration
+# This file is generated during desktop build.
+schema_version = 1
+
+[engine]
+  device              = "auto"  # auto | cpu | cuda
+  max_attempts        = 3
+  max_concurrent_jobs = 2
+  max_concurrent_cpu  = 1
+  max_concurrent_gpu  = 1
+  queue_size          = 128
+'@
+    [System.IO.File]::WriteAllText($configPath, $configText, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "Wrote packaged config: $configPath"
+}
+
 $repoRoot = Resolve-Path "."
 if (-not $env:GOCACHE) {
     $env:GOCACHE = Join-Path $repoRoot ".gocache"
@@ -153,7 +179,11 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $resolvedOutputDir = Resolve-Path $OutputDir
 $backendExePath = Join-Path $resolvedOutputDir "you2midi-backend.exe"
 $updaterExePath = Join-Path $resolvedOutputDir "you2midi-updater.exe"
-$launcherExePath = Join-Path $resolvedOutputDir "you2midi-launcher.exe"
+$launcherExePath = Join-Path $resolvedOutputDir "You2midi.exe"
+$legacyLauncherExePath = Join-Path $resolvedOutputDir "you2midi-launcher.exe"
+if (Test-Path $legacyLauncherExePath) {
+    Remove-Item -Path $legacyLauncherExePath -Force
+}
 $cudaLegacyDir = Join-Path $resolvedOutputDir "runtime/cuda"
 if (Test-Path $cudaLegacyDir) {
     Remove-Item -Path $cudaLegacyDir -Recurse -Force
@@ -186,7 +216,6 @@ $ensureLauncherArgs = @(
     "-ExecutionPolicy", "Bypass",
     "-File", $ensureLauncherScript,
     "-SourceDir", $resolvedOutputDir,
-    "-GitHubRepo", $LauncherGitHubRepo,
     "-GitHubAPIBase", $LauncherGitHubAPIBase,
     "-InstallerAssetPattern", $LauncherInstallerAssetPattern,
     "-PatchAssetPattern", $LauncherPatchAssetPattern,
@@ -194,16 +223,19 @@ $ensureLauncherArgs = @(
     "-UpdaterExecutable", "you2midi-updater.exe",
     "-Force"
 )
-if ($LauncherInstallDirCandidates -and $LauncherInstallDirCandidates.Count -gt 0) {
-    $ensureLauncherArgs += @("-InstallDirCandidates")
-    $ensureLauncherArgs += $LauncherInstallDirCandidates
+if ($LauncherGitHubRepo) {
+    $ensureLauncherArgs += @("-GitHubRepo", $LauncherGitHubRepo)
 }
 & powershell @ensureLauncherArgs
 if ($LASTEXITCODE -ne 0) {
     throw "launcher config generation failed with exit code $LASTEXITCODE"
 }
 
+Write-PackagedConfig -OutputRoot $resolvedOutputDir
+
 if ($UseRemotePythonRuntime) {
+    Stop-You2MidiRuntimeProcesses
+
     $archiveUrl = $PythonRuntimeArchiveUrl
     if (-not $archiveUrl) {
         $archiveUrl = $env:YOU2MIDI_PYTHON_RUNTIME_URL
@@ -222,6 +254,20 @@ if ($UseRemotePythonRuntime) {
     $manifestJson = $manifest | ConvertTo-Json -Depth 8
     [System.IO.File]::WriteAllText($runtimeManifestPath, $manifestJson, [System.Text.UTF8Encoding]::new($false))
     Write-Host "Wrote remote runtime manifest: $runtimeManifestPath"
+
+    # Remote runtime mode ships only manifest in installer.
+    # Do not force-delete local runtime/python here: with file locks this can partially delete
+    # the runtime and cause first-run bootstrap errors (e.g., missing encodings).
+    $staleRuntimePaths = @(
+        (Join-Path $runtimeRootDir "python"),
+        (Join-Path $runtimeRootDir "python.new"),
+        (Join-Path $runtimeRootDir "python.old"),
+        (Join-Path $runtimeRootDir ".deps_ready.json")
+    )
+    $existingStaleRuntime = @($staleRuntimePaths | Where-Object { Test-Path $_ })
+    if ($existingStaleRuntime.Count -gt 0) {
+        Write-Warning "Existing local runtime payload detected (left as-is to avoid partial deletion under file locks). Installer staging excludes runtime/python automatically."
+    }
 
     $venvDestDir = Join-Path $runtimeRootDir "venv"
     if (Test-Path $venvDestDir) {
@@ -305,7 +351,7 @@ $destExe = Join-Path $resolvedOutputDir "you2midi-desktop.exe"
 Copy-Item -Path $exe.FullName -Destination $destExe -Force
 Copy-Item -Path $backendExePath -Destination (Join-Path $binDir "you2midi-backend.exe") -Force
 Copy-Item -Path $updaterExePath -Destination (Join-Path $binDir "you2midi-updater.exe") -Force
-Copy-Item -Path $launcherExePath -Destination (Join-Path $binDir "you2midi-launcher.exe") -Force
+Copy-Item -Path $launcherExePath -Destination (Join-Path $binDir "You2midi.exe") -Force
 Copy-Item -Path $launcherConfigPath -Destination (Join-Path $binDir "launcher-config.json") -Force
 
 Write-Host "Desktop executable ready: $destExe"

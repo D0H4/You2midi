@@ -4,7 +4,7 @@
 Package a Windows desktop release with:
 - Wails desktop executable (`you2midi-desktop.exe`)
 - Updater executable (`you2midi-updater.exe`)
-- Launcher executable (`you2midi-launcher.exe`)
+- Launcher executable (`You2midi.exe`)
 - Installer (`Inno Setup`)
 - Artifact SHA256 manifest
 - Post-build smoke check
@@ -77,7 +77,7 @@ make installer
 - In remote runtime mode, desktop app reads `runtime/python-runtime.json` and auto-downloads the runtime archive on first launch.
 
 ## Launcher Flow
-- `you2midi-launcher.exe` is the user entrypoint.
+- `You2midi.exe` is the user entrypoint.
 - If app is not installed:
   - Prompts user and downloads the latest `You2Midi-Setup-*.exe` from GitHub Releases.
 - If app is installed:
