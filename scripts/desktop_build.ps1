@@ -18,7 +18,9 @@ param(
     [string]$FfmpegDir = "",
     [string]$CudaRuntimeDir = "",
     [string]$WebView2BootstrapperUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
+    [string]$VCRedistX64Url = "https://aka.ms/vs/17/release/vc_redist.x64.exe",
     [switch]$SkipWebView2Bootstrapper,
+    [switch]$SkipVCRedistBootstrapper,
     [switch]$Strict
 )
 
@@ -96,6 +98,28 @@ function Ensure-WebView2Bootstrapper {
     Invoke-WebRequest -Uri $BootstrapperUrl -OutFile $destFile
     if (-not (Test-Path $destFile)) {
         throw "Failed to download WebView2 bootstrapper to '$destFile'"
+    }
+    return $destFile
+}
+
+function Ensure-VCRedistBootstrapper {
+    param(
+        [string]$OutputRoot,
+        [string]$BootstrapperUrl
+    )
+    $destDir = Join-Path $OutputRoot "runtime/vcredist"
+    New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+    $destFile = Join-Path $destDir "vc_redist.x64.exe"
+
+    if (Test-Path $destFile) {
+        Write-Host "VC++ Redistributable bootstrapper already present: $destFile"
+        return $destFile
+    }
+
+    Write-Host "Downloading VC++ Redistributable bootstrapper from '$BootstrapperUrl'..."
+    Invoke-WebRequest -Uri $BootstrapperUrl -OutFile $destFile
+    if (-not (Test-Path $destFile)) {
+        throw "Failed to download VC++ Redistributable bootstrapper to '$destFile'"
     }
     return $destFile
 }
@@ -319,6 +343,15 @@ if (-not $SkipWebView2Bootstrapper) {
         Write-Host "Bundled WebView2 bootstrapper: $wv2Bootstrapper"
     } catch {
         if (-not (Stop-OrWarn "WebView2 bootstrapper bundle failed: $($_.Exception.Message)")) { exit 0 }
+    }
+}
+
+if (-not $SkipVCRedistBootstrapper) {
+    try {
+        $vcRedistBootstrapper = Ensure-VCRedistBootstrapper -OutputRoot $resolvedOutputDir -BootstrapperUrl $VCRedistX64Url
+        Write-Host "Bundled VC++ Redistributable bootstrapper: $vcRedistBootstrapper"
+    } catch {
+        if (-not (Stop-OrWarn "VC++ Redistributable bootstrapper bundle failed: $($_.Exception.Message)")) { exit 0 }
     }
 }
 

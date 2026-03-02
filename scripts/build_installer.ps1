@@ -104,6 +104,11 @@ if (-not (Test-Path $webView2Bootstrapper)) {
     if (-not (Stop-OrWarn "WebView2 bootstrapper '$webView2Bootstrapper' not found. Re-run desktop build without -SkipWebView2Bootstrapper.")) { exit 0 }
 }
 
+$vcRedistBootstrapper = Join-Path $srcPath "runtime/vcredist/vc_redist.x64.exe"
+if (-not (Test-Path $vcRedistBootstrapper)) {
+    if (-not (Stop-OrWarn "VC++ Redistributable bootstrapper '$vcRedistBootstrapper' not found. Re-run desktop build without -SkipVCRedistBootstrapper.")) { exit 0 }
+}
+
 if ($RequireCudaRuntime) {
     Write-Warning "-RequireCudaRuntime is deprecated and ignored. Standalone CUDA runtime bundling was removed; CUDA support relies on venv-packaged torch libraries and host NVIDIA driver compatibility."
 }
